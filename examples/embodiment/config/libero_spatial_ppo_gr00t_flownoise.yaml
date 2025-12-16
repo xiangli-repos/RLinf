@@ -28,7 +28,7 @@ runner:
 
   only_eval: False
   val_check_interval: -1
-  save_interval: 30
+  save_interval: 100
   seq_length: 4096
   max_prompt_length: 30
 
@@ -136,8 +136,8 @@ actor:
     embodiment_tag: "libero_franka"
     use_wrist_image: True
     rl_head_config:
-      joint_logprob: False
-      noise_method: "flow_sde"
+      joint_logprob: True
+      noise_method: "flow_noise"
       ignore_last: False
       safe_get_logprob: False
       noise_anneal: False
@@ -150,8 +150,8 @@ actor:
       disable_dropout: True
 
   optim:
-    lr: 2.0e-5
-    value_lr: 2.0e-5
+    lr: 9.0e-6
+    value_lr: 1.0e-5
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-05

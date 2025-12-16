@@ -311,6 +311,11 @@ def get_model(model_path, cfg: DictConfig, override_config_kwargs=None):
             # reinitialize the value head after model loading, or there are nan values in the value head after model loading.
             model.action_head.value_head._init_weights()
 
+        if cfg.rl_head_config.noise_method == "flow_noise":
+            from rlinf.models.embodiment.gr00t.utils import initialize_weights_mlp_tanh
+
+            model.action_head.explore_noise_net.apply(initialize_weights_mlp_tanh)
+
         if cfg.rl_head_config.disable_dropout:
             replace_dropout_with_identity(model)
     else:

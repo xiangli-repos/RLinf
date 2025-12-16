@@ -125,3 +125,23 @@ def squeeze_dict_values(data: dict[str, Any]) -> dict[str, Any]:
         else:
             squeezed_data[k] = v
     return squeezed_data
+
+
+def initialize_weights_mlp_tanh(m):
+    """
+    Initializes the weights of a PyTorch module containing only
+    Linear and Activation layers, optimized for Tanh activation.
+    Uses Xavier Uniform initialization.
+
+    Args:
+        m (torch.nn.Module): The module or sub-module to initialize.
+    """
+    if isinstance(m, nn.Linear):
+        # Apply Xavier Uniform initialization (Glorot initialization)
+        # This is the recommended method for layers followed by Tanh or Sigmoid
+        # The gain factor (default is 1) can be adjusted, but is usually 1 for Tanh.
+        nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain("tanh"))
+
+        # Initialize bias to zero (common practice)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)

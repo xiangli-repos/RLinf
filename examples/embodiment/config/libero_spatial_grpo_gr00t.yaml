@@ -41,21 +41,21 @@ algorithm:
   # if set null, the initial states will be sampled from the whole libero-spatial suite. )
   normalize_advantages: True
   kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
-  group_size: 1
+  group_size: 8
   max_episode_steps: 240
   use_ordered_reset_state_ids: False
   reward_coef: 1.0
   n_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
   n_eval_chunk_steps: ${int_div:${env.train.max_episode_steps}, ${actor.model.num_action_chunks}}
-  num_group_envs: 64
+  num_group_envs: 8
   rollout_epoch: 8
   reward_type: chunk_level
   logprob_type: chunk_level
   entropy_type: chunk_level
 
   update_epoch: 1
-  adv_type: gae
-  loss_type: actor_critic
+  adv_type: grpo
+  loss_type: actor
   loss_agg_func: "token-mean" 
   kl_beta: 0.0
   entropy_bonus: 0

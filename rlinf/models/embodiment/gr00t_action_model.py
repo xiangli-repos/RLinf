@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
@@ -63,8 +64,8 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
                 bias_last=True,
             )
 
-        if self.rl_config.noise_method == "reinflow":
-            self.reinflow_explore_noise_net = ExploreNoiseNet(
+        if self.rl_config.noise_method == "flow_noise":
+            self.explore_noise_net = ExploreNoiseNet(
                 in_dim=self.hidden_size,
                 out_dim=self.config.action_dim,
                 hidden_dims=[128, 64],
@@ -212,10 +213,10 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
                 x0_weight = (torch.ones_like(t_input) - (t_input + delta)) * cos_term
                 x1_weight = t_input + delta
                 x_t_std = (1 - (t_input + delta)) * sin_term
-            elif self.rl_config.noise_method == "reinflow":
+            elif self.rl_config.noise_method == "flow_noise":
                 x0_weight = 1 - (t_input + delta)
                 x1_weight = t_input + delta
-                x_t_std = self.reinflow_explore_noise_net(model_output)
+                x_t_std = self.explore_noise_net(model_output)
             else:
                 raise ValueError(f"Invalid noise method: {self.rl_config.noise_method}")
         # In eval, this equals to x_t_mean = x_t + v*dt(dt>0).
@@ -273,7 +274,7 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
                     denoise_inds = torch.tensor(
                         [random.randint(0, num_steps - 1)] * num_steps
                     )
-                elif self.rl_config.noise_method == "reinflow":
+                elif self.rl_config.noise_method == "flow_noise":
                     denoise_inds = torch.tensor(
                         [random.randint(0, num_steps - 1)] * num_steps
                     )
@@ -349,14 +350,18 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
 
         chains_log_probs = []
         chains_values = []
+        chains_entropy = []
+
         if self.rl_config.joint_logprob:
-            num_steps = self.config.num_steps
+            num_steps = self.num_inference_timesteps
             initial_log_prob = self.get_logprob_norm(
                 chains[:, 0],
                 torch.zeros_like(chains[:, 0]),
                 torch.ones_like(chains[:, 0]),
             )
             chains_log_probs.append(initial_log_prob)
+            initial_entropy = self.gaussian_entropy(torch.ones_like(chains[:, 0]))
+            chains_entropy.append(initial_entropy)
         else:
             num_steps = 1
         for idx in range(num_steps):
@@ -376,9 +381,18 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
             log_probs = self.get_logprob_norm(chains_next, x_t_mean, x_t_std)
             chains_log_probs.append(log_probs)
             chains_values.append(value_t)
+            entropy = self.gaussian_entropy(x_t_std)
+            chains_entropy.append(entropy)
         chains_log_probs = torch.stack(chains_log_probs, dim=1)
         chains_values = torch.stack(chains_values, dim=1)
-        return chains_log_probs, chains_values
+
+        # entropy is only available for flow-noise method
+        if self.rl_config.noise_method == "flow_noise":
+            chains_entropy = torch.stack(chains_entropy, dim=1)
+        else:
+            chains_entropy = torch.zeros_like(chains_log_probs)
+
+        return chains_log_probs, chains_values, chains_entropy
 
     def sample_noise(self, shape, device):
         return torch.normal(
@@ -388,6 +402,12 @@ class FlowMatchingActionHeadForRLActionPrediction(FlowmatchingActionHead):
             dtype=torch.bfloat16,
             device=device,
         )
+
+    def gaussian_entropy(self, sigma):
+        mask = sigma == 0
+        sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
+        entropy = 0.5 * torch.log(2 * math.pi * math.e * (sigma_safe**2))
+        return entropy
 
 
 class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
@@ -435,6 +455,9 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
         self.model_path = Path(local_model_path)
         self.compute_dtype = compute_dtype
         self.output_action_chunks = output_action_chunks
+        # In libero, the max token length for vlm is 570. It changes with the dataset.
+        # It's necessary to pad the token length to same length because RLinf requires the same length for all batches.
+        self.max_token_length = 570
 
         # Convert string embodiment tag to EmbodimentTag enum if needed
         if isinstance(embodiment_tag, str):
@@ -488,7 +511,7 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
 
         chains = data["chains"]
         denoise_inds = data["denoise_inds"]
-        log_probs, value_t = self.action_head(
+        log_probs, value_t, entropy = self.action_head(
             backbone_output=backbone_outputs,
             action_input=action_inputs,
             chains=chains,
@@ -497,6 +520,12 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
         )
 
         log_probs = log_probs[
+            :,
+            :,
+            : self.action_head.action_chunk,
+            : self.action_head.rl_config.valid_action_dim,
+        ]
+        entropy = entropy[
             :,
             :,
             : self.action_head.action_chunk,
@@ -517,12 +546,15 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
                 : self.action_head.rl_config.valid_action_dim,
             ]
         value_t = value_t.mean(dim=-1, keepdim=False)
+        entropy = entropy.mean(dim=[1, 2, 3], keepdim=False)[
+            :, None
+        ]  # [:,None] to align with loss-mask shape
 
         return {
             "logprobs": log_probs.float(),
             "prev_logprobs": prev_logprobs.float(),
             "values": value_t,
-            "entropy": None,
+            "entropy": entropy,
         }
 
     @torch.no_grad()
@@ -558,13 +590,20 @@ class GR00T_N1_5_ForRLActionPrediction(GR00T_N1_5):
 
         normalized_input["eagle_input_ids"] = torch.nn.functional.pad(
             normalized_input["eagle_input_ids"],
-            pad=(0, 570 - normalized_input["eagle_input_ids"].shape[-1]),
+            pad=(
+                0,
+                self.max_token_length - normalized_input["eagle_input_ids"].shape[-1],
+            ),
             mode="constant",
             value=0,
         )
         normalized_input["eagle_attention_mask"] = torch.nn.functional.pad(
             normalized_input["eagle_attention_mask"],
-            pad=(0, 570 - normalized_input["eagle_attention_mask"].shape[-1]),
+            pad=(
+                0,
+                self.max_token_length
+                - normalized_input["eagle_attention_mask"].shape[-1],
+            ),
             mode="constant",
             value=0,
         )
